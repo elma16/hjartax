@@ -1,8 +1,0 @@
-torch
-torchdiffeq
-numpy
-pandas
-
-tqdm
-pyarrow
-matplotlib

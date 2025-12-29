@@ -26,7 +26,7 @@ def plot_workout_predictions(model, workout):
 
     # title with ODE parameters
     ode_params = predictions["ode_params"]
-    title = f"ODE parameters: "
+    title = "ODE parameters: "
     for k, v in ode_params.items():
         title += f"{k}={v:.2f}, "
     title = title[:-2]

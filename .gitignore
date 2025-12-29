@@ -1,0 +1,42 @@
+# IDE and editor files
+.vscode/
+.idea/
+*.iml
+
+# Build and cache directories
+build/
+__pycache__/
+tests/__pycache__/
+
+# OS-specific files
+.DS_Store
+
+# Media files
+*.mp4
+*.gif
+*.png
+*.jpg
+
+# Output directories
+plots/
+outputs/
+profiler/
+data/
+traces/
+cache/
+htmlcov/
+trace/
+.ruff_cache/
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Python-related files
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+
+*.coverage

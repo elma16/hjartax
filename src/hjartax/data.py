@@ -3,17 +3,17 @@
 # Copyright (C) 2020 Apple Inc. All Rights Reserved.
 #
 
+from __future__ import annotations
+
 import datetime
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
-import torch
-import torch.utils.data
 import tqdm
-from torch.utils.data import DataLoader
+import jax.numpy as jnp
 
 
 @dataclass
@@ -58,8 +58,8 @@ class WorkoutDatasetConfig:
     time_of_start_column: str = "time_start"
     heart_rate_column: str = "heart_rate"
     heart_rate_normalized_column: str = "heart_rate_normalized"
-    activity_columns: List[str] = list
-    weather_columns: List[str] = list
+    activity_columns: List[str] = field(default_factory=list)
+    weather_columns: List[str] = field(default_factory=list)
 
     history_max_length: Optional[int] = None
     chunk_size: Optional[int] = 64
@@ -76,42 +76,9 @@ class WorkoutDatasetConfig:
         return len(self.weather_columns)
 
 
-class WorkoutDataset(torch.utils.data.Dataset):
+class WorkoutDataset:
     """
-    A torch Dataset for the workouts.
-
-    Organize the data into tensors, and potentially divide each training
-    sequence into smaller chunks of fixed duration (for efficient batching).
-    No normalization is performed on the measurements.
-    Normalization is performed on the times (they are expected to be in seconds).
-
-    Iterating on a WorkoutDataset will return a dictionary with the following keys:
-        `subject_id`: str
-        `workout_id`: str
-        `heart_rate`: tensor of heart rates in bpm.
-            Shape (sequence_length,)
-        `activity`: tensor of activity measurements specified in the WorkoutDatasetConfig.
-            Shape (sequence_length, n_activity_channels)
-        `time`: tensor of times (normalized by 1200 seconds in pre-processing)
-            Shape (sequence_length,)
-        `weather`: tensor of weather measurements specified in the WorkoutDatasetConfig.
-            Shape (sequence_length, n_weather_channels)
-        `full_workout_length`: length of the workout (= `heart_rate.shape[0]` = `time.shape[0]` = `activity.shape[0]`)
-            important to recover the data when the tensors are 0 right padded when batched.
-        `history`: Contains all the past workouts concatenated and cropped to a max number of measurement specified
-            in the config. Contains the normalized heart rates, times, activity measurements and number of days between
-            the historical workout and the workout.
-        `history_length`: length of the history; important to mask the data in the encoder when the tensors right padded
-            with 0 when batched.
-        `activity_measurements_names`: names of the activity measurements specified in the WorkoutDatasetConfig.
-        `weather_measurements_names`: names of the weather measurements specified in the WorkoutDatasetConfig.
-
-    Parameters
-    ----------
-    data : pd.DataFrame
-        The data
-    dataset_config: WorkoutDatasetConfig
-        The config
+    A dataset for workouts. Matches the original PyTorch dataset but yields NumPy arrays.
     """
 
     def __init__(
@@ -132,6 +99,7 @@ class WorkoutDataset(torch.utils.data.Dataset):
         self.stride = self.dataset_config.stride
 
         self.subject_ids = []
+        self.subject_indices = []
         self.workout_ids = []
         self.weathers = []
         self.full_workout_lengths = []
@@ -144,6 +112,7 @@ class WorkoutDataset(torch.utils.data.Dataset):
 
         self.workout_id_to_all_measurements = dict()
         self.workout_id_to_history = dict()
+        self.subject_id_to_index = dict()
 
         self.n_subjects = 0
         self.n_workouts = 0
@@ -155,6 +124,7 @@ class WorkoutDataset(torch.utils.data.Dataset):
     def _add_workout_entry(
         self,
         subject_id,
+        subject_index,
         workout_id,
         full_workout_length,
         weather,
@@ -165,6 +135,7 @@ class WorkoutDataset(torch.utils.data.Dataset):
         end_index=None,
     ):
         self.subject_ids.append(subject_id)
+        self.subject_indices.append(subject_index)
         self.workout_ids.append(workout_id)
         self.full_workout_lengths.append(full_workout_length)
         self.weathers.append(weather)
@@ -173,10 +144,15 @@ class WorkoutDataset(torch.utils.data.Dataset):
         self.times.append(times[start_index:end_index])
 
     def prepare_data(self):
+        unique_subject_ids = self.data[self.dataset_config.subject_id_column].unique()
+        self.subject_id_to_index = {
+            s_id: idx for idx, s_id in enumerate(unique_subject_ids)
+        }
         for i in tqdm.tqdm(range(self.data.shape[0])):
             current_workout = self.data.iloc[i]
             subject_id = current_workout[self.dataset_config.subject_id_column]
             workout_id = current_workout[self.dataset_config.workout_id_column]
+            subject_index = self.subject_id_to_index[subject_id]
 
             heart_rates = np.array(
                 current_workout[self.dataset_config.heart_rate_column]
@@ -207,15 +183,20 @@ class WorkoutDataset(torch.utils.data.Dataset):
             }
 
             if self.chunk_size is not None:
-                indices = list(range(0, times.shape[0] - self.chunk_size, self.stride))
-                if (
-                    indices[-1] + self.chunk_size < times.shape[0]
-                ):  # we include the workout end
-                    indices.append(times.shape[0] - self.chunk_size)
-                indices = torch.LongTensor(indices)
+                max_start = times.shape[0] - self.chunk_size
+                if max_start < 0:
+                    indices = [0]
+                else:
+                    indices = list(range(0, max_start, self.stride))
+                    if indices:
+                        if indices[-1] + self.chunk_size < times.shape[0]:
+                            indices.append(times.shape[0] - self.chunk_size)
+                    else:
+                        indices = [0]
                 for j in indices:
                     self._add_workout_entry(
                         subject_id,
+                        subject_index,
                         workout_id,
                         full_workout_length,
                         weather,
@@ -229,6 +210,7 @@ class WorkoutDataset(torch.utils.data.Dataset):
             else:
                 self._add_workout_entry(
                     subject_id,
+                    subject_index,
                     workout_id,
                     full_workout_length,
                     weather,
@@ -238,6 +220,7 @@ class WorkoutDataset(torch.utils.data.Dataset):
                 )
 
         self.subject_ids = np.array(self.subject_ids)
+        self.subject_indices = np.array(self.subject_indices)
         self.workout_ids = np.array(self.workout_ids)
         self.weathers = np.array(self.weathers)
         self.full_workout_lengths = np.array(self.full_workout_lengths)
@@ -269,14 +252,12 @@ class WorkoutDataset(torch.utils.data.Dataset):
 
         workouts_per_subject = defaultdict(list)
         past_workouts_per_workout = dict()
-        for i, workout in self.data.sort_values(
+        for _, workout in self.data.sort_values(
             self.dataset_config.time_of_start_column
         ).iterrows():
             workout_id = workout[self.dataset_config.workout_id_column]
             subject_id = workout[self.dataset_config.subject_id_column]
             date = workout[self.dataset_config.time_of_start_column]
-            # save the past workouts for each workout (the loop is sorted by date, so workouts_per_subject contains
-            # exactly the past workouts)
             past_workouts_per_workout[workout_id] = (
                 date,
                 workouts_per_subject[subject_id].copy(),
@@ -284,11 +265,10 @@ class WorkoutDataset(torch.utils.data.Dataset):
             workouts_per_subject[subject_id].append((date, workout_id))
 
         def gather_workout_measurements(workout_all_data, workout_date, reference_date):
-            # prepare a numpy array with all the measurements
             delta_seconds = reference_date - workout_date
-            if type(delta_seconds) in [datetime.timedelta, pd.Timedelta]:
+            if isinstance(delta_seconds, (datetime.timedelta, pd.Timedelta)):
                 delta_seconds = delta_seconds.total_seconds()
-            elif type(delta_seconds) == np.timedelta64:
+            elif isinstance(delta_seconds, np.timedelta64):
                 delta_seconds = delta_seconds.astype("timedelta64[s]").astype(float)
 
             return np.concatenate(
@@ -302,20 +282,17 @@ class WorkoutDataset(torch.utils.data.Dataset):
                 axis=-1,
             )
 
-        all_sizes = []
         for w_id in tqdm.tqdm(past_workouts_per_workout):
             date, past_workout_ids = past_workouts_per_workout[w_id]
             past_workouts_data = []
             current_length = 0
             for past_d, past_w_id in past_workout_ids[::-1]:
-                # prepare the past data
                 past_workout = gather_workout_measurements(
                     self.workout_id_to_all_measurements[past_w_id], past_d, date
                 )
                 past_workouts_data.append(past_workout)
                 current_length += len(past_workout)
                 if current_length > self.dataset_config.history_max_length:
-                    # we have enough data, no need to continue
                     break
             past_workouts_data = past_workouts_data[::-1]
             if past_workouts_data:
@@ -323,26 +300,23 @@ class WorkoutDataset(torch.utils.data.Dataset):
             else:
                 past_workouts_data = -np.ones((1, self.encoder_input_dim))
             n_idx = self.dataset_config.history_max_length
-            all_sizes.append(len(past_workouts_data))
             self.workout_id_to_history[w_id] = past_workouts_data[-n_idx:]
 
         for w_id in self.workout_ids:
             self.history.append(self.workout_id_to_history[w_id])
 
-    def get_indices_by_subject_ids(self, subject_ids):
+    def get_indices_by_subject_ids(self, subject_ids: Sequence):
         tmp = set(subject_ids)
         return [i for i, v in enumerate(self.subject_ids) if v in tmp]
 
-    def get_indices_by_workout_ids(self, workout_ids):
+    def get_indices_by_workout_ids(self, workout_ids: Sequence):
         tmp = set(workout_ids)
         return [i for i, v in enumerate(self.workout_ids) if v in tmp]
 
     def __getitem__(self, i):
-        """
-        Returns a dictionary with the workout sample at index i
-        """
         res = {
             "subject_id": self.subject_ids[i],
+            "subject_index": self.subject_indices[i],
             "workout_id": self.workout_ids[i],
             "heart_rate": self.heart_rates[i],
             "activity": self.activity[i],
@@ -365,74 +339,89 @@ class WorkoutDataset(torch.utils.data.Dataset):
         return self.len
 
 
-def workout_dataset_collate_fn(batch):
-    """
-    Collate function for the workout dataset, to be used by a torch DataLoader.
+def _pad_sequences(arrays: Sequence[np.ndarray], pad_value: float = 0.0) -> np.ndarray:
+    max_len = max(a.shape[0] for a in arrays)
+    tail_shape = arrays[0].shape[1:]
+    out = np.full((len(arrays), max_len, *tail_shape), pad_value, dtype=np.float32)
+    for i, arr in enumerate(arrays):
+        out[i, : arr.shape[0]] = arr
+    return out
 
-    Parameters
-    ----------
-    batch: list of dictionaries
-        each dictionary is a workout sample
 
-    Returns
-    -------
-    res: dictionary
-        the collated batch, a dictionary with the same keys as the input batch, but with the values collated into
-        a single tensor/array
-    """
+def workout_dataset_collate_fn(batch: List[dict]):
     res = dict()
     for k in batch[0]:
         if batch[0][k] is None:
             res[k] = None
         elif k in ["heart_rate", "activity", "time", "history"]:
             lengths = [len(a[k]) for a in batch]
+            arrays = [np.asarray(a[k], dtype=np.float32) for a in batch]
             if len(set(lengths)) == 1:
-                res[k] = torch.stack([torch.FloatTensor(a[k]) for a in batch])
+                res[k] = jnp.asarray(np.stack(arrays))
             else:
-                res[k] = torch.nn.utils.rnn.pad_sequence(
-                    [torch.FloatTensor(a[k]) for a in batch],
-                    batch_first=True,
-                )
+                res[k] = jnp.asarray(_pad_sequences(arrays))
         elif k in ["weather"]:
-            res[k] = torch.FloatTensor(np.array([a[k] for a in batch]))
-        elif k in ["full_workout_length"]:
-            res[k] = torch.LongTensor(np.array([a[k] for a in batch]))
-        elif isinstance(batch[0][k], torch.Tensor) or isinstance(batch[0][k], int):
-            res[k] = torch.utils.data.dataloader.default_collate([a[k] for a in batch])
+            res[k] = jnp.asarray(np.array([a[k] for a in batch]), dtype=jnp.float32)
+        elif k in ["full_workout_length", "history_length", "subject_index"]:
+            res[k] = jnp.asarray(np.array([a[k] for a in batch]), dtype=jnp.int32)
+        elif k in ["subject_id", "workout_id"]:
+            res[k] = np.array([a[k] for a in batch])
         elif k in ["activity_measurements_names", "weather_measurements_names"]:
-            # we don't collate these
             res[k] = batch[0][k]
         else:
             res[k] = np.array([a[k] for a in batch])
-
     return res
 
 
-def make_dataloaders(train_dataset, test_dataset, batch_size=256):
-    """
-    Make dataloaders for the train and test datasets.
+class WorkoutDataLoader:
+    def __init__(
+        self,
+        dataset: WorkoutDataset,
+        batch_size: int = 256,
+        shuffle: bool = False,
+        drop_last: bool = False,
+        seed: int = 0,
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.rng = np.random.default_rng(seed)
 
-    Parameters
-    ----------
-    train_dataset: WorkoutDataset
-        the train dataset, which will be shuffled
-    test_dataset: WorkoutDataset
-        the test dataset, which will not be shuffled
-    batch_size: int
-        the batch size to use for the dataloaders
-    """
-    train_dataloader = DataLoader(
+    def __iter__(self):
+        indices = np.arange(len(self.dataset))
+        if self.shuffle:
+            self.rng.shuffle(indices)
+        batch = []
+        for idx in indices:
+            batch.append(self.dataset[idx])
+            if len(batch) == self.batch_size:
+                yield workout_dataset_collate_fn(batch)
+                batch = []
+        if batch and not self.drop_last:
+            yield workout_dataset_collate_fn(batch)
+
+    def __len__(self):
+        n_batches = len(self.dataset) // self.batch_size
+        if not self.drop_last and len(self.dataset) % self.batch_size != 0:
+            n_batches += 1
+        return n_batches
+
+
+def make_dataloaders(train_dataset, test_dataset, batch_size=256, seed=0):
+    train_dataloader = WorkoutDataLoader(
         train_dataset,
         batch_size=batch_size,
-        collate_fn=workout_dataset_collate_fn,
         shuffle=True,
         drop_last=True,
+        seed=seed,
     )
-    test_dataloader = DataLoader(
+    test_dataloader = WorkoutDataLoader(
         test_dataset,
         batch_size=batch_size,
-        collate_fn=workout_dataset_collate_fn,
         shuffle=False,
+        drop_last=False,
+        seed=seed,
     )
 
     return train_dataloader, test_dataloader

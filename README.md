@@ -1,8 +1,8 @@
 # Modeling Personalized Heart Rate Response to Exercise and Environmental Factors with Wearables Data
 
-This repository contains the code associated with the research paper _Modeling
-Personalized Heart Rate Response to Exercise and Environmental Factors with Wearables
-Data_ (Nazaret et al. NPJ Digital Medicine, 2023).
+This repository contains the `hjartax` JAX implementation of the hybrid ODE model. It is a fork of the
+original GitHub repository from Apple accompanying the research paper _Modeling Personalized Heart Rate
+Response to Exercise and Environmental Factors with Wearables Data_ (Nazaret et al. NPJ Digital Medicine, 2023).
 [Link forthcoming](https://www.nature.com/npjdigitalmed).
 
 ## Abstract
@@ -38,9 +38,12 @@ for development and testing purposes. See the [Usage](#usage) section for notes 
 
 ### Installation
 
-1. Clone this repository: `git clone https://github.com/Apple/repo-name.git`
-2. Change to the project directory: `cd repo-name`
-3. Install the required packages: `pip install -r requirements.txt`
+1. Clone this repository: `git clone https://github.com/elma16/hjartax.git`
+2. Change to the project directory: `cd hjartax`
+3. Install the package: `pip install -e .`
+
+JAX installs differently for CPU/GPU, so refer to the [JAX installation guide](https://github.com/google/jax#installation)
+if you need GPU/TPU support. The base dependencies are listed in `pyproject.toml`.
 
 ### Dataset
 The Apple Heart and Movement Study dataset is not publicly available for privacy reasons.
@@ -62,24 +65,25 @@ The code is organized as follows:
 
 ```
 .
-├── ode
-│   ├── data.py                 # Data loading and preprocessing
-│   ├── modules_cnn.py          # Modules for the CNN encoder
-│   ├── modules_dense_nn.py     # Modules for all scalar dense NNs
-│   ├── ode.py                  # Hybrid ODE model
-│   └── trainer.py              # Trainer for the ODE model
+├── src
+│   └── hjartax
+│       ├── data.py                 # Data loading and preprocessing (NumPy/JAX)
+│       ├── modules_cnn.py          # Modules for the CNN encoder (JAX)
+│       ├── modules_dense_nn.py     # Modules for all scalar dense NNs (JAX)
+│       ├── ode.py                  # Hybrid ODE model (JAX + diffrax)
+│       └── trainer.py              # Trainer for the ODE model (JAX + optax)
 ├── examples
 │   ├── preprocess.py            # Script to preprocess the endomondo dataset
 │   ├── plotting.py             # Helper functions to plot the data
 │   └── train_ode_model.ipynb   # Example notebook to train the ODE model
 ├── readme.md                   # This file
-└── requirements.txt            # Required packages
+├── pyproject.toml              # Modern packaging metadata
 ```
 
 ### Usage
 
 * **Step 1: Prepare the data.**
-The `WorkoutDataset` class in `ode/data.py` loads the data from a pandas dataframe and preprocesses it, according to 
+The `WorkoutDataset` class in `src/hjartax/data.py` loads the data from a pandas dataframe and preprocesses it, according to 
 the `WorkoutDatasetConfig` class. In the current implementation, all the measurements (HR, speed ...) are assumed to be sampled on a
 uniformly sampled time grid (that we can obtain by interpolating the data).
 The following data is required in the dataframe:
@@ -97,7 +101,7 @@ The following data is required in the dataframe:
 
 
 * **Step 3: Train the ODE model.**
-  * The function `train_ode_model` in `ode/trainer.py` trains the `ODEModel`.
+  * The function `train_ode_model` in `src/hjartax/trainer.py` trains the `ODEModel` and returns the updated model plus logs.
 
 An example is provided in `examples/train_ode_model.ipynb`. 
 
